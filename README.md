@@ -17,6 +17,7 @@ Hold a hotkey, speak, release — the transcribed text is typed wherever your cu
 - Optional minimum-hold threshold to ignore accidental modifier presses
 - API keys stored locally in `~/.config/dictate/config.json` (mode 600)
 - **Wayland-compatible**: uses `evdev` for key capture and `ydotool` for typing, falls back to `pynput`/`xdotool` on X11
+- **Windows / macOS**: `pip install PyQt6 sounddevice pynput requests numpy` and run `python gui.py`; hotkeys and typing go through `pynput`. Pair it with the Yorik provider and the machine needs no model.
 
 ## Requirements
 

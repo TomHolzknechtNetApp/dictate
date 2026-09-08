@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import requests
 import sounddevice as sd
+import sys
 from pynput import keyboard
 
 SAMPLE_RATE = 16000
@@ -178,6 +179,11 @@ def type_text(text):
     # therefore wrong for non-US keyboards, but there is no better option
     # for global typing into native Wayland windows today.
     import os
+    if os.name == "nt" or sys.platform == "darwin":
+        # Windows / macOS: no xdotool or ydotool; pynput types through the
+        # OS input API and respects the active keyboard layout.
+        keyboard.Controller().type(text)
+        return
     on_x11 = os.environ.get("XDG_SESSION_TYPE") == "x11"
     tools = ["xdotool", "ydotool"] if on_x11 else ["ydotool", "xdotool"]
     for tool in tools:
