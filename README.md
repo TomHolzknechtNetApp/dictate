@@ -9,7 +9,8 @@ Hold a hotkey, speak, release — the transcribed text is typed wherever your cu
 - Push-to-talk or tap-to-toggle modes
 - System tray icon with status (ready / recording / transcribing)
 - Hotkey bound to any function key, modifier (Ctrl / Alt / Shift), or Logitech-style mouse side button
-- Three transcription backends:
+- Four transcription backends:
+  - **Yorik** (home server) — sends the clip to a Yorik install on the LAN (`/v1/audio/transcriptions`, personal API token from Yorik's Settings → API tokens). One Parakeet for every device in the house; this machine carries no model.
   - **Groq** cloud — `whisper-large-v3-turbo`, `whisper-large-v3`
   - **OpenAI** cloud — `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `whisper-1`
   - **Local** offline — `parakeet-primeline` (German fine-tune of `nvidia/parakeet-tdt-0.6b-v3`, int8 ONNX via [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)). CPU-only, ~50 ms decode for 2 s audio at 4 threads. No network, no API key.

@@ -42,6 +42,17 @@ PROVIDERS = {
         ],
         "is_local":      False,
     },
+    "yorik": {
+        "label":         "Yorik (home server)",
+        "url":           "http://127.0.0.1:8000/v1/audio/transcriptions",
+        "models_url":    None,
+        "key_field":     "yorik_token",
+        "key_prefix":    "yk_",
+        "default_model": "parakeet",
+        "models": [("Yorik's configured engine (Parakeet, CPU)", "parakeet")],
+        "is_local":      False,
+        "url_field":     "yorik_url",   # base URL, editable in Settings
+    },
     "parakeet_local": {
         "label":         "Local (Parakeet DE, CPU offline)",
         "url":           None,
@@ -100,7 +111,18 @@ DEFAULT_CONFIG = {
     "model":                 DEFAULT_MODEL,
     "threshold":             0.0,
     "local_stt_num_threads": 4,    # sherpa-onnx CPU thread count for parakeet_local
+    "yorik_url":             "http://127.0.0.1:8000",  # Yorik base URL (provider "yorik")
+    "yorik_token":           "",   # personal API token from Yorik Settings → API tokens
 }
+
+
+def provider_url(cfg, p):
+    """Endpoint URL for an HTTP provider; Yorik's comes from the config."""
+    if p.get("url_field"):
+        base = (cfg.get(p["url_field"]) or "").strip().rstrip("/")
+        if base:
+            return base + "/v1/audio/transcriptions"
+    return p["url"]
 
 
 def provider_key(cfg):
@@ -235,13 +257,21 @@ def transcribe(audio, cfg):
     files = {"file": ("audio.wav", wav, "audio/wav")}
     data = {"model": model, "response_format": "text"}
     headers = {"Authorization": f"Bearer {key}"}
-    r = requests.post(p["url"], files=files, data=data, headers=headers, timeout=30)
+    r = requests.post(provider_url(cfg, p), files=files, data=data, headers=headers, timeout=30)
     r.raise_for_status()
     return r.text.strip()
 
 
-def test_api_key(api_key, provider=DEFAULT_PROVIDER):
+def test_api_key(api_key, provider=DEFAULT_PROVIDER, cfg=None):
     p = PROVIDERS.get(provider, PROVIDERS[DEFAULT_PROVIDER])
+    if provider == "yorik":
+        # A token is valid when Yorik lists the caller's tokens with it.
+        base = ((cfg or {}).get("yorik_url") or DEFAULT_CONFIG["yorik_url"]).strip().rstrip("/")
+        try:
+            r = requests.get(base + "/api/tokens", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
+            return r.status_code == 200
+        except Exception:
+            return False
     if p.get("is_local") or not p.get("models_url"):
         return False  # no key to test — caller should not have called this
     try:

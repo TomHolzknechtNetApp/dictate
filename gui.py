@@ -84,6 +84,11 @@ class SettingsDialog(QDialog):
         self.api_key_label = QLabel()
         self.form.addRow(self.api_key_label, self.api_key_wrap)
 
+        # --- Yorik URL row (shown only for the Yorik provider) ---
+        self.yorik_url_edit = QLineEdit(self.cfg.get("yorik_url", core.DEFAULT_CONFIG["yorik_url"]))
+        self.yorik_url_edit.setPlaceholderText("http://yorik.local:8000")
+        self.form.addRow("Yorik URL:", self.yorik_url_edit)
+
         # Per-provider key cache — only providers that actually take a key.
         self._keys = {
             pid: self.cfg.get(pdef["key_field"], "")
@@ -186,6 +191,7 @@ class SettingsDialog(QDialog):
         # Toggle row visibility. QFormLayout.setRowVisible(widget, bool) hides
         # both the field and its label.
         self.form.setRowVisible(self.api_key_wrap, not is_local)
+        self.form.setRowVisible(self.yorik_url_edit, pid == "yorik")
         self.form.setRowVisible(self.model_box, not is_local)
         self.form.setRowVisible(self.test_btn, not is_local)
         self.form.setRowVisible(self.local_status_label, is_local)
@@ -272,7 +278,8 @@ class SettingsDialog(QDialog):
         self.test_btn.setEnabled(False)
         self.test_btn.setText("Testing...")
         QApplication.processEvents()
-        ok = core.test_api_key(key, self.provider_box.currentData())
+        ok = core.test_api_key(key, self.provider_box.currentData(),
+                               cfg={"yorik_url": self.yorik_url_edit.text().strip()})
         self.test_btn.setEnabled(True)
         self.test_btn.setText("Test API key")
         if ok:
@@ -295,6 +302,8 @@ class SettingsDialog(QDialog):
             "model":                 self.model_box.currentData(),
             "threshold":             float(self.threshold_box.value()),
             "local_stt_num_threads": int(self.local_threads_box.value()),
+            "yorik_url":             self.yorik_url_edit.text().strip() or core.DEFAULT_CONFIG["yorik_url"],
+            "yorik_token":           self._keys.get("yorik", ""),
         }
 
 
