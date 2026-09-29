@@ -1,6 +1,8 @@
 """Shared dictation core: config, recording, transcription, typing."""
 import io
 import json
+import logging
+import logging.handlers
 import subprocess
 import threading
 import wave
@@ -74,6 +76,19 @@ GROQ_MODELS_URL  = PROVIDERS["groq"]["models_url"]
 
 CONFIG_DIR = Path.home() / ".config" / "dictate"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+LOG_PATH = Path.home() / ".local" / "state" / "dictate" / "dictate.log"
+
+log = logging.getLogger("dictate")
+
+
+def setup_logging():
+    """Every recording leaves one line in LOG_PATH, so a dictation that went
+    nowhere can be traced afterwards. Never logs transcribed text."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    h = logging.handlers.RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=2)
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(h)
+    log.setLevel(logging.INFO)
 
 KEY_MAP = {f"f{i}": {getattr(keyboard.Key, f"f{i}")} for i in range(1, 13)}
 KEY_MAP.update({
@@ -162,11 +177,14 @@ def save_config(cfg):
         pass
 
 
-def notify(msg, urgency="normal"):
-    subprocess.run(
-        ["notify-send", "-u", urgency, "-t", "1500", "Dictate", msg],
-        check=False,
-    )
+def notify(msg, urgency="normal", timeout_ms=1500):
+    try:
+        subprocess.run(
+            ["notify-send", "-u", urgency, "-t", str(timeout_ms), "Dictate", msg],
+            check=False,
+        )
+    except FileNotFoundError:
+        pass
 
 
 def type_text(text):
@@ -189,53 +207,78 @@ def type_text(text):
     for tool in tools:
         try:
             if tool == "xdotool":
-                subprocess.run(["xdotool", "type", "--delay", "0", "--", text], check=False)
+                r = subprocess.run(["xdotool", "type", "--delay", "0", "--", text], check=False)
             else:
-                subprocess.run(
+                r = subprocess.run(
                     ["ydotool", "type", "--key-delay", "0", "--", text],
                     check=False,
                     stderr=subprocess.DEVNULL,
                 )
+            if r.returncode != 0:
+                log.error("%s exited with %s — text not typed", tool, r.returncode)
+                notify(f"Typing failed ({tool} exit {r.returncode})", urgency="critical", timeout_ms=5000)
             return
         except FileNotFoundError:
             continue
 
 
 class Recorder:
+    """Each recording is a "take" (stream + its frames). detach() hands the
+    current take to the caller without touching PipeWire, so a new start()
+    can never collide with a take that is still being finished on a worker
+    thread (trailing buffer + slow PipeWire close)."""
+
     def __init__(self):
-        self.frames = []
-        self.stream = None
-        self.recording = False
+        self._take = None
         self.lock = threading.Lock()
 
-    def _callback(self, indata, frames, time_info, status):
-        self.frames.append(indata.copy())
+    @property
+    def recording(self):
+        return self._take is not None
 
     def start(self):
         with self.lock:
-            if self.recording:
+            if self._take is not None:
                 return
-            self.frames = []
-            self.stream = sd.InputStream(
+            frames = []
+
+            def callback(indata, n, time_info, status):
+                frames.append(indata.copy())
+
+            stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype="int16",
-                callback=self._callback,
+                callback=callback,
             )
-            self.stream.start()
-            self.recording = True
+            stream.start()
+            self._take = (stream, frames)
+
+    def detach(self):
+        """Non-blocking: give up the current take (or None). Safe on the GUI thread."""
+        with self.lock:
+            take, self._take = self._take, None
+            return take
+
+    @staticmethod
+    def finish(take):
+        """Close a detached take and return its audio, or None if it has none.
+        Blocks for hundreds of ms on PipeWire close — call from a worker."""
+        if take is None:
+            return None
+        stream, frames = take
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            # A vanished mic must not lose what was already captured.
+            log.exception("closing input stream failed")
+        if not frames:
+            return None
+        return np.concatenate(frames, axis=0)
 
     def stop(self):
-        with self.lock:
-            if not self.recording:
-                return None
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
-            self.recording = False
-            if not self.frames:
-                return None
-            return np.concatenate(self.frames, axis=0)
+        return self.finish(self.detach())
 
 
 def to_wav_bytes(audio):
@@ -247,6 +290,25 @@ def to_wav_bytes(audio):
         wf.writeframes(audio.tobytes())
     buf.seek(0)
     return buf
+
+
+FAILED_DIR = LOG_PATH.parent / "failed"
+FAILED_KEEP = 3
+
+
+def keep_failed_audio(audio):
+    """Save a recording that held sound but came back empty, so the failure
+    can be replayed. Only the newest FAILED_KEEP files are kept."""
+    try:
+        import time
+        FAILED_DIR.mkdir(parents=True, exist_ok=True)
+        path = FAILED_DIR / time.strftime("%Y%m%d-%H%M%S.wav")
+        path.write_bytes(to_wav_bytes(audio).getvalue())
+        for old in sorted(FAILED_DIR.glob("*.wav"))[:-FAILED_KEEP]:
+            old.unlink()
+        log.info("kept failed recording as %s", path)
+    except Exception:
+        log.exception("could not keep failed recording")
 
 
 def transcribe(audio, cfg):

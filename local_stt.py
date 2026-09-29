@@ -23,6 +23,8 @@ MODEL_FILES = [
 ]
 TARGET_SR = 16000
 DEFAULT_THREADS = 4
+TARGET_PEAK = 0.5   # quiet pieces are raised to this peak before decoding
+MAX_GAIN = 30.0     # but never amplified more than this, so room noise stays noise
 
 
 def model_installed() -> bool:
@@ -105,11 +107,50 @@ class LocalRecognizer:
         # sherpa-onnx wants float32 in [-1, 1]
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32) / 32768.0
+        parts = []
         with self._decode_lock:
-            s = self._recognizer.create_stream()
-            s.accept_waveform(TARGET_SR, audio)
-            self._recognizer.decode_stream(s)
-            return s.result.text
+            for chunk in _split(audio):
+                text = self._decode(chunk)
+                # The model now and then returns nothing for a long piece that
+                # clearly holds speech; shorter pieces of the same audio decode.
+                if not text and len(chunk) > RETRY_CHUNK_S * TARGET_SR:
+                    text = " ".join(t for t in map(self._decode, _split(chunk, RETRY_CHUNK_S)) if t)
+                parts.append(text)
+        return " ".join(p for p in parts if p)
+
+    def _decode(self, chunk: np.ndarray) -> str:
+        # Quiet input (speech around -45 dBFS, peak ~0.03) comes back empty
+        # as a whole; the same audio raised to a peak of 0.5 decodes in full.
+        peak = float(np.abs(chunk).max()) if len(chunk) else 0.0
+        if 0.0 < peak < TARGET_PEAK:
+            chunk = chunk * min(TARGET_PEAK / peak, MAX_GAIN)
+        s = self._recognizer.create_stream()
+        s.accept_waveform(TARGET_SR, chunk)
+        self._recognizer.decode_stream(s)
+        return s.result.text.strip()
+
+
+# The encoder fails outright on more than 400 s of audio ("Attempting to
+# broadcast an axis ...") and its memory grows quadratically before that
+# (180 s ≈ 3.5 GB), so long dictations are decoded in pieces.
+MAX_CHUNK_S = 90
+RETRY_CHUNK_S = 20  # piece length for the second pass over a piece that came back empty
+_SEARCH_S = 15      # look for a pause in the last part of each piece
+_WIN_S = 0.4
+
+
+def _split(audio: np.ndarray, max_s: float = MAX_CHUNK_S):
+    """Yield pieces of at most max_s, cut at the quietest spot near the end."""
+    search_s = min(_SEARCH_S, max_s / 2)
+    max_n, search_n, win_n = (int(x * TARGET_SR) for x in (max_s, search_s, _WIN_S))
+    while len(audio) > max_n:
+        tail = audio[max_n - search_n:max_n]
+        n_win = len(tail) // win_n
+        energy = (tail[:n_win * win_n].reshape(n_win, win_n) ** 2).mean(axis=1)
+        cut = max_n - search_n + int(energy.argmin()) * win_n + win_n // 2
+        yield audio[:cut]
+        audio = audio[cut:]
+    yield audio
 
 
 _instance: Optional[LocalRecognizer] = None

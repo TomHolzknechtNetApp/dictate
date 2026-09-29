@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 
+import numpy as np
 from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
@@ -355,6 +356,7 @@ class MainWindow(QMainWindow):
         self.recording_active = False
         self.listener = None
         self._target_keys = set()
+        self._last_other = None
 
         self.press_time = 0.0
 
@@ -472,6 +474,7 @@ class MainWindow(QMainWindow):
                 if k in self._target_keys:
                     self.bridge.hotkey_press.emit()
                 else:
+                    self._last_other = k
                     self.bridge.other_press.emit()
             except Exception:
                 pass
@@ -519,9 +522,17 @@ class MainWindow(QMainWindow):
         # that was started by a previous tap.
         if self.cfg["mode"] == "ptt" and self.recording_active:
             # Offload PipeWire close to keep the GUI thread responsive.
-            threading.Thread(target=self.recorder.stop, daemon=True).start()
+            self._discard_take()
             self.recording_active = False
             self.set_status("ready", "Cancelled (combo)")
+            held = time.monotonic() - self.press_time
+            core.log.info("cancelled after %.1fs by %s", held, self._last_other)
+            # A shortcut like Ctrl+C cancels within a moment and needs no
+            # message; a long hold was a dictation that just got thrown away.
+            min_hold = float(self.cfg.get("threshold", 0.0))
+            if held >= max(min_hold, 1.0):
+                core.notify(f"Recording cancelled after {held:.0f}s — another key or mouse button was pressed",
+                            urgency="critical", timeout_ms=5000)
 
     def on_release(self):
         self.key_held = False
@@ -533,7 +544,7 @@ class MainWindow(QMainWindow):
         min_hold = float(self.cfg.get("threshold", 0.0))
         if min_hold > 0 and duration < min_hold:
             # Discard branch also blocks on recorder.stop() → freeze. Offload.
-            threading.Thread(target=self.recorder.stop, daemon=True).start()
+            self._discard_take()
             self.recording_active = False
             self.set_status("ready", f"Discarded (held {duration:.1f}s)")
             return
@@ -544,7 +555,12 @@ class MainWindow(QMainWindow):
         if not core.provider_key(self.cfg):
             self.set_status("error", "No API key — open Settings")
             return False
-        self.recorder.start()
+        try:
+            self.recorder.start()
+        except Exception as e:
+            core.log.exception("could not open the microphone")
+            self.on_error(f"Microphone: {e}")
+            return False
         self.set_status("recording", "Recording...")
         return True
 
@@ -554,26 +570,45 @@ class MainWindow(QMainWindow):
         # whole pipeline (stop + transcribe) onto a worker thread and update
         # status immediately from the main thread instead.
         self.set_status("transcribing", "Transcribing...")
-        threading.Thread(target=self._stop_and_transcribe_worker, daemon=True).start()
+        # Detach here, on the GUI thread: the take now belongs to the worker,
+        # so pressing the hotkey again right away starts a fresh recording
+        # instead of being swallowed by the worker's delayed stop.
+        take = self.recorder.detach()
+        threading.Thread(target=self._stop_and_transcribe_worker, args=(take,), daemon=True).start()
 
-    def _stop_and_transcribe_worker(self):
+    def _discard_take(self):
+        take = self.recorder.detach()
+        threading.Thread(target=core.Recorder.finish, args=(take,), daemon=True).start()
+
+    def _stop_and_transcribe_worker(self, take):
         # Short trailing buffer: PipeWire has ~50-100ms input latency and
         # people typically finish the last syllable *after* they release the
         # hotkey. Without this the last word tends to get clipped.
         time.sleep(0.25)
-        try:
-            audio = self.recorder.stop()
-        except Exception as e:
-            self.bridge.error.emit(str(e))
-            return
+        audio = core.Recorder.finish(take)
         if audio is None:
-            self.bridge.transcribed.emit("")
+            core.log.warning("no audio captured (mic delivered no frames)")
+            self.bridge.error.emit("No audio captured — check the microphone")
             return
+        secs = len(audio) / core.SAMPLE_RATE
+        peak = int(np.abs(audio).max())
+        t0 = time.monotonic()
         try:
             text = core.transcribe(audio, self.cfg)
-            self.bridge.transcribed.emit(text or "")
         except Exception as e:
+            core.log.exception("transcribe failed: %.1fs audio, peak %d", secs, peak)
             self.bridge.error.emit(str(e))
+            return
+        core.log.info("transcribed %.1fs audio, peak %d, %d chars in %.1fs",
+                      secs, peak, len(text or ""), time.monotonic() - t0)
+        if not text:
+            # Peak is out of 32768; a live mic with speech is in the thousands.
+            why = "microphone was silent" if peak < 300 else "no speech recognised"
+            if peak >= 300:
+                core.keep_failed_audio(audio)
+            self.bridge.error.emit(f"Nothing transcribed ({secs:.0f}s) — {why}")
+            return
+        self.bridge.transcribed.emit(text)
 
     def on_transcribed(self, text):
         if text:
@@ -583,6 +618,9 @@ class MainWindow(QMainWindow):
 
     def on_error(self, msg):
         self.set_status("error", f"Error: {msg[:80]}")
+        # The window is usually hidden in the tray, so the status label alone
+        # means the dictation fails without anyone noticing.
+        threading.Thread(target=core.notify, args=(msg[:200], "critical", 5000), daemon=True).start()
 
     def set_status(self, state, msg):
         bg, fg = STATUS_STYLES.get(state, STATUS_STYLES["ready"])
@@ -631,6 +669,8 @@ def acquire_single_instance_lock():
 def main():
     if not acquire_single_instance_lock():
         sys.exit(0)
+    core.setup_logging()
+    core.log.info("started")
     # Let Ctrl+C in the terminal actually kill us — Qt's C++ event loop
     # otherwise never yields to Python's SIGINT handler.
     import signal
