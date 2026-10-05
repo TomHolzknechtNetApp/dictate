@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Dictate GUI — PyQt6 tray app for voice dictation via Groq Whisper."""
-import fcntl
 import sys
 import threading
 import time
@@ -657,8 +656,13 @@ def acquire_single_instance_lock():
     lock_path = core.CONFIG_DIR / "dictate.lock"
     fd = open(lock_path, "w")
     try:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
         fd.close()
         core.notify("Dictate is already running", urgency="low")
         return False
