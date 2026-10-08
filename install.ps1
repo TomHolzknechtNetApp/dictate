@@ -9,8 +9,10 @@
     4. Creates a Start Menu shortcut (and optional autostart entry).
     5. Registers an uninstall entry in "Installed apps".
 
-    The speech model (about 640 MB) is NOT downloaded here unless you pass
-    -DownloadModel. Otherwise the app downloads it from Settings on first use.
+    6. Asks whether to download the offline speech model now (about 640 MB, one
+       time) and shows a progress bar. Pass -DownloadModel to say yes without the
+       question, or -NoModel to say no. If you skip it, the app downloads the
+       model from Settings on first use.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -22,6 +24,7 @@ param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Dictate'),
     [switch]$Autostart,
     [switch]$DownloadModel,
+    [switch]$NoModel,
     [switch]$NoShortcuts,
     [switch]$NoRegister,
     [switch]$NoPythonInstall,
@@ -182,14 +185,48 @@ try {
         Write-Ok 'Dictate now appears in Settings > Apps > Installed apps.'
     }
 
-    # --- 6. Optional model download ---------------------------------------
-    if ($DownloadModel) {
-        Write-Step 'Downloading the local speech model (about 640 MB)'
-        Push-Location $InstallDir
-        try {
-            & $venvPy -c "import local_stt; local_stt.download_model(print)"
-            if ($LASTEXITCODE -ne 0) { Write-Warn2 'Model download failed. Retry from Settings in the app.' }
-        } finally { Pop-Location }
+    # --- 6. Offline speech model -------------------------------------------
+    Write-Step 'Offline speech model (Parakeet, German, runs on the CPU)'
+    $modelDir = Join-Path $HOME '.local\share\dictate\models\parakeet-primeline-onnx'
+    $modelFiles = @('encoder.int8.onnx', 'encoder.int8.onnx.data', 'decoder.int8.onnx', 'joiner.int8.onnx', 'tokens.txt')
+    $missing = @($modelFiles | Where-Object { -not (Test-Path (Join-Path $modelDir $_)) })
+    if ($missing.Count -eq 0) {
+        Write-Ok "Model already installed: $modelDir"
+    } else {
+        $doModel = $false
+        if ($DownloadModel) {
+            $doModel = $true
+        } elseif ($NoModel) {
+            Write-Warn2 'Skipped (-NoModel). Download it later from Settings in the app.'
+        } else {
+            $answer = $null
+            try {
+                $answer = Read-Host 'Download the offline model now? About 640 MB, one time. [Y/n]'
+            } catch {
+                Write-Warn2 'No console input. Skipping the model. Download it later from Settings in the app.'
+            }
+            if ($null -ne $answer) {
+                $doModel = ($answer.Trim() -eq '' -or $answer.Trim() -match '^(y|yes|j|ja)$')
+                if (-not $doModel) { Write-Warn2 'Skipped. Download it later from Settings in the app.' }
+            }
+        }
+        if ($doModel) {
+            Write-Host '    Downloading from huggingface.co. The bars below show the progress.'
+            Remove-Item Env:HF_HUB_DISABLE_PROGRESS_BARS -ErrorAction SilentlyContinue
+            $env:PYTHONUNBUFFERED = '1'
+            Push-Location $InstallDir
+            try {
+                & $venvPy -c "import local_stt; local_stt.download_model(lambda m: print('   ', m))"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warn2 'Model download failed. Retry it from Settings in the app.'
+                } else {
+                    Write-Ok 'Model downloaded.'
+                }
+            } finally {
+                Pop-Location
+                Remove-Item Env:PYTHONUNBUFFERED -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     Write-Host ""

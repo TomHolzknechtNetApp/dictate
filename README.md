@@ -55,7 +55,7 @@ Two ways, both per user, no admin rights needed:
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-It finds Python 3.10+ (installs 3.12 with `winget` if missing), creates a virtual environment in `%LOCALAPPDATA%\Programs\Dictate`, installs all packages, adds a Start Menu shortcut, and registers an uninstall entry. Options: `-Autostart` (start at sign-in), `-DownloadModel` (fetch the ~640 MB local model now), `-Proxy http://host:port`, `-InstallDir <path>`.
+It finds Python 3.10+ (installs 3.12 with `winget` if missing), creates a virtual environment in `%LOCALAPPDATA%\Programs\Dictate`, installs all packages, adds a Start Menu shortcut, and registers an uninstall entry. At the end it asks whether to download the ~640 MB offline model now and shows a progress bar. Options: `-Autostart` (start at sign-in), `-DownloadModel` (say yes without the question), `-NoModel` (say no), `-Proxy http://host:port`, `-InstallDir <path>`.
 
 **B. Setup.exe** — build it once with `powershell -ExecutionPolicy Bypass -File .\build-setup.ps1 -Version 1.0.0`. This writes `dist\Dictate-Setup-1.0.0.zip`. Give the zip to users. They unzip it and double-click `setup.exe`. It runs `install.ps1` with the defaults. The build uses IExpress, which ships with Windows. The exe is not code-signed, so SmartScreen can warn.
 
